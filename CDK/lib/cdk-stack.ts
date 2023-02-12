@@ -5,6 +5,10 @@ import * as dynamodb from '@aws-cdk/aws-dynamodb';
 import * as lambda from '@aws-cdk/aws-lambda';
 import * as apigateway from '@aws-cdk/aws-apigateway';
 import * as CustomResources from '@aws-cdk/custom-resources';
+import { Pipeline } from '@aws-cdk/aws-codepipeline';
+import { CodeBuildAction, GitHubSourceAction } from '@aws-cdk/aws-codepipeline-actions';
+import { Artifact } from '@aws-cdk/aws-codepipeline/lib/artifact';
+import { BuildSpec, LinuxBuildImage, PipelineProject } from '@aws-cdk/aws-codebuild';
 
 
 
@@ -41,11 +45,11 @@ export class CdkStack extends cdk.Stack {
       compatibleRuntimes: [lambda.Runtime.NODEJS_14_X]
     });
 
-    
+
     const addItemLambda = new lambda.Function(this, 'TodoApplicationAddItemFunction', {
       runtime: lambda.Runtime.NODEJS_14_X,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset('../application/functions/add-item', {exclude: ["node_modules", "*.json"]}),
+      code: lambda.Code.fromAsset('../application/functions/add-item', { exclude: ["node_modules", "*.json"] }),
       environment: {
         TODO_ITEMS_TABLE_NAME: todoItemsTable.tableName,
         ALLOWED_ORIGINS: '*'
@@ -67,10 +71,10 @@ export class CdkStack extends cdk.Stack {
       layers: [
         sharedCodeLayer
       ]
-  });
+    });
 
     todoItemsTable.grantReadData(getItemsLambda)
-    
+
     const apiGateway = new apigateway.RestApi(this, 'TodoApplicationApiGateway', {
       restApiName: 'TodoApplicationApi'
     })
@@ -86,7 +90,7 @@ export class CdkStack extends cdk.Stack {
 
     const frontendConfig = {
       itemsApi: apiGateway.url,
-      lastChanged : new Date().toUTCString()
+      lastChanged: new Date().toUTCString()
     };
 
     const dataString = `window.AWSConfig = ${JSON.stringify(frontendConfig, null, 4)};`
@@ -103,14 +107,55 @@ export class CdkStack extends cdk.Stack {
       physicalResourceId: CustomResources.PhysicalResourceId.of(`${frontendBucket.bucketName}`)
     };
     const s3Upload = new CustomResources.AwsCustomResource(this, 'TodoApplicationSetConfigJS', {
-      policy: CustomResources.AwsCustomResourcePolicy.fromSdkCalls({ resources: CustomResources.AwsCustomResourcePolicy.ANY_RESOURCE}),
+      policy: CustomResources.AwsCustomResourcePolicy.fromSdkCalls({ resources: CustomResources.AwsCustomResourcePolicy.ANY_RESOURCE }),
       onUpdate: putUpdate,
       onCreate: putUpdate
     });
     s3Upload.node.addDependency(bucketDeploymennt);
     s3Upload.node.addDependency(apiGateway)
+
+    // Pipeline
+
+    const pipeline = new Pipeline(this, "EducasePipeline", {
+      pipelineName: "Pipeline",
+      crossAccountKeys: false,
+    })
+
+    const sourceOutput = new Artifact('SourceOutput');
+
+    pipeline.addStage({
+      stageName: "Source",
+      actions: [
+        new GitHubSourceAction({
+          owner: 'Zanele-M',
+          repo: 'educase',
+          branch: 'main',
+          actionName: 'Pipeline-Source',
+          oauthToken: cdk.SecretValue.secretsManager('github'),
+          output: sourceOutput
+        })
+      ]
+    });
+
+    const cdkBuildOutput = new Artifact('CdkBuildOutput');
+    pipeline.addStage({
+      stageName: "Build",
+      actions: [
+        new CodeBuildAction({
+          actionName: 'Educase',
+          input: sourceOutput,
+          outputs: [cdkBuildOutput],
+          project: new PipelineProject(this, 'CdkBuildProject', {
+            environment: {
+              buildImage: LinuxBuildImage.STANDARD_5_0
+            },
+            buildSpec: BuildSpec.fromSourceFilename('build-specs/cdk-build-spec.yml')
+          })
+        })]
+    });
   }
 }
+
 function newDate() {
   throw new Error('Function not implemented.');
 }
